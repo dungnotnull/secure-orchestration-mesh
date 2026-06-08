@@ -1,7 +1,5 @@
-# Secure Orchestration Mesh
-
 <div align="center">
-
+<h1>Secure Orchestration Mesh</h1>
 **Zero-Trust Security Protocol for AI Orchestrator ↔ Sub-Agent Communication**
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
