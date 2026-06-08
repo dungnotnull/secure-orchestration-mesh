@@ -1,0 +1,124 @@
+# secure-orchestration-mesh configuration
+# Loaded via pydantic-settings from YAML + env vars (env takes precedence)
+
+# ── Server ─────────────────────────────────────────────────────
+server:
+  host: "0.0.0.0"
+  port: 50051
+  grpc_max_workers: 100
+  grpc_max_concurrent_streams: 10000
+  stream_lease_seconds: 300
+
+# ── Security ───────────────────────────────────────────────────
+security:
+  jwt:
+    algorithm: "RS256"
+    ttl_seconds: 60
+    issuer: "secure-orchestration-mesh"
+    # Paths to PEM files (generated on first run if missing)
+    private_key_path: "config/jwt_private.pem"
+    public_key_path: "config/jwt_public.pem"
+  tls:
+    enabled: true
+    cert_path: "config/server.crt"
+    key_path: "config/server.key"
+    ca_cert_path: "config/ca.crt"
+  # Replay window in seconds — packets outside this window are rejected
+  replay_window_seconds: 30
+
+# ── Anomaly Detection ──────────────────────────────────────────
+anomaly:
+  isolation_forest:
+    enabled: true
+    model_path: "models/isolation_forest.pkl"
+    contamination: 0.01
+    n_estimators: 100
+    # Anomaly score threshold above which agent is flagged SUSPICIOUS
+    suspicious_threshold: 0.65
+    # Anomaly score threshold above which agent is flagged CRITICAL
+    critical_threshold: 0.85
+    # Number of consecutive SUSPICIOUS windows before auto-quarantine
+    consecutive_suspicious_for_quarantine: 2
+    # Time window size in seconds for feature aggregation
+    window_size_seconds: 10
+  lstm_autoencoder:
+    enabled: false  # Phase 2
+    model_path: "models/lstm_autoencoder.pt"
+    sequence_length: 50
+    reconstruction_error_threshold: 0.15
+  log_classifier:
+    enabled: false  # Phase 2
+    model_path: "models/bert_log_classifier"
+    bert_model_id: "google-bert/bert-base-uncased"
+
+# ── LLM Backends ───────────────────────────────────────────────
+llm:
+  provider: "ollama"  # ollama | claude | gpt4o
+  ollama:
+    base_url: "http://localhost:11434"
+    model: "phi3:mini"
+    timeout_seconds: 30
+    max_tokens: 1024
+  claude:
+    api_key_env: "CLAUDE_API_KEY"
+    model: "claude-sonnet-4-20250514"
+    max_tokens: 4096
+    timeout_seconds: 60
+  gpt4o:
+    api_key_env: "OPENAI_API_KEY"
+    model: "gpt-4o"
+    max_tokens: 4096
+    timeout_seconds: 60
+
+# ── Self-Update Pipeline ───────────────────────────────────────
+self_update:
+  enabled: false  # Phase 4
+  schedule: "weekly"  # cron: 0 2 * * 1 (Monday 02:00 UTC)
+  output_file: "SECOND-KNOWLEDGE-BRAIN.md"
+  relevance_threshold: 0.70
+  sources:
+    arxiv:
+      categories: ["cs.CR", "cs.MA", "cs.AI", "cs.NI"]
+      max_results_per_query: 50
+    security_conferences:
+      enabled: true
+      urls:
+        - "https://www.usenix.org/conference/usenixsecurity25/technical-sessions"
+        - "https://www.ndss-symposium.org/ndss2025/programme/"
+    cve_feed:
+      enabled: true
+      url: "https://nvd.nist.gov/feeds/json/cve/1.1/nvdcve-1.1-recent.json.gz"
+
+# ── Database ───────────────────────────────────────────────────
+database:
+  # SQLite for behavioral metrics log
+  path: "data/behavioral_metrics.db"
+  pool_size: 5
+
+# ── Logging & Telemetry ────────────────────────────────────────
+logging:
+  level: "INFO"  # DEBUG | INFO | WARNING | ERROR | CRITICAL
+  format: "json"  # json | console
+  output: "stdout"  # stdout | file
+  file_path: "logs/orchestrator.log"
+
+telemetry:
+  enabled: true
+  jaeger:
+    host: "localhost"
+    port: 6831
+    service_name: "secure-orchestration-mesh"
+
+# ── Agent Defaults ─────────────────────────────────────────────
+agent_defaults:
+  max_payload_bytes: 10485760   # 10 MiB
+  max_execution_ms: 300000      # 5 minutes
+  heartbeat_interval_seconds: 5
+  heartbeat_timeout_seconds: 15
+  registration_timeout_seconds: 30
+
+# ── Quarantine ─────────────────────────────────────────────────
+quarantine:
+  auto_quarantine_enabled: true
+  manual_review_required: false
+  max_quarantine_duration_minutes: 60

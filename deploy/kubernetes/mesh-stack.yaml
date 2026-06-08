@@ -1,0 +1,367 @@
+# Kubernetes deployment for secure-orchestration-mesh
+# Usage: kubectl apply -f deploy/kubernetes/
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: secure-mesh
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mesh-secrets
+  namespace: secure-mesh
+type: Opaque
+stringData:
+  claude-api-key: ""
+  openai-api-key: ""
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mesh-config
+  namespace: secure-mesh
+data:
+  config.yaml: |
+    server:
+      host: "0.0.0.0"
+      port: 50051
+      grpc_max_workers: 100
+      grpc_max_concurrent_streams: 10000
+      stream_lease_seconds: 300
+    security:
+      jwt:
+        algorithm: "RS256"
+        ttl_seconds: 60
+        issuer: "secure-orchestration-mesh"
+      tls:
+        enabled: true
+      replay_window_seconds: 30
+    anomaly:
+      isolation_forest:
+        enabled: true
+        suspicious_threshold: 0.65
+        critical_threshold: 0.85
+        consecutive_suspicious_for_quarantine: 2
+      lstm_autoencoder:
+        enabled: false
+      log_classifier:
+        enabled: false
+    llm:
+      provider: "ollama"
+      ollama:
+        base_url: "http://ollama-service:11434"
+        model: "phi3:mini"
+    database:
+      path: "/data/behavioral_metrics.db"
+    logging:
+      level: "INFO"
+      format: "json"
+    telemetry:
+      enabled: true
+      jaeger:
+        host: "jaeger-service"
+        port: 6831
+    agent_defaults:
+      max_payload_bytes: 10485760
+      max_execution_ms: 300000
+    quarantine:
+      auto_quarantine_enabled: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator
+  namespace: secure-mesh
+  labels:
+    app: orchestrator
+    component: mesh-core
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orchestrator
+  template:
+    metadata:
+      labels:
+        app: orchestrator
+        component: mesh-core
+    spec:
+      containers:
+        - name: orchestrator
+          image: secure-orchestration-mesh-orchestrator:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 50051
+              name: grpc
+              protocol: TCP
+            - containerPort: 8443
+              name: websocket
+              protocol: TCP
+          env:
+            - name: CONFIG_PATH
+              value: /app/config/config.yaml
+            - name: SOM__LLM__PROVIDER
+              value: "ollama"
+            - name: CLAUDE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mesh-secrets
+                  key: claude-api-key
+                  optional: true
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mesh-secrets
+                  key: openai-api-key
+                  optional: true
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+            - name: data
+              mountPath: /app/data
+            - name: models
+              mountPath: /app/models
+            - name: reports
+              mountPath: /app/reports
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          livenessProbe:
+            exec:
+              command: ["python", "-c", "import grpc; print('ok')"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["python", "-c", "import grpc; print('ok')"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: config
+          configMap:
+            name: mesh-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: mesh-data-pvc
+        - name: models
+          persistentVolumeClaim:
+            claimName: mesh-models-pvc
+        - name: reports
+          persistentVolumeClaim:
+            claimName: mesh-reports-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestrator-service
+  namespace: secure-mesh
+spec:
+  type: ClusterIP
+  selector:
+    app: orchestrator
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+      protocol: TCP
+    - name: websocket
+      port: 8443
+      targetPort: 8443
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-agent
+  namespace: secure-mesh
+  labels:
+    app: worker-agent
+    component: mesh-agent
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: worker-agent
+  template:
+    metadata:
+      labels:
+        app: worker-agent
+        component: mesh-agent
+    spec:
+      containers:
+        - name: agent
+          image: secure-orchestration-mesh-agent:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ORCHESTRATOR_ADDRESS
+              value: "orchestrator-service:50051"
+            - name: AGENT_LABEL
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: AGENT_CAPABILITIES
+              value: "web_search,file_read,api_call,data_analysis"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  namespace: secure-mesh
+  labels:
+    app: ollama
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ollama
+  template:
+    metadata:
+      labels:
+        app: ollama
+    spec:
+      containers:
+        - name: ollama
+          image: ollama/ollama:latest
+          ports:
+            - containerPort: 11434
+              name: http
+          volumeMounts:
+            - name: ollama-data
+              mountPath: /root/.ollama
+          resources:
+            requests:
+              memory: 4Gi
+            limits:
+              memory: 8Gi
+      volumes:
+        - name: ollama-data
+          persistentVolumeClaim:
+            claimName: ollama-data-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama-service
+  namespace: secure-mesh
+spec:
+  type: ClusterIP
+  selector:
+    app: ollama
+  ports:
+    - name: http
+      port: 11434
+      targetPort: 11434
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: secure-mesh
+  labels:
+    app: jaeger
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jaeger
+  template:
+    metadata:
+      labels:
+        app: jaeger
+    spec:
+      containers:
+        - name: jaeger
+          image: jaegertracing/all-in-one:latest
+          ports:
+            - containerPort: 6831
+              protocol: UDP
+              name: thrift
+            - containerPort: 16686
+              name: web-ui
+          env:
+            - name: COLLECTOR_ZIPKIN_HOST_PORT
+              value: ":9411"
+          resources:
+            requests:
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger-service
+  namespace: secure-mesh
+spec:
+  type: ClusterIP
+  selector:
+    app: jaeger
+  ports:
+    - name: thrift
+      port: 6831
+      targetPort: 6831
+      protocol: UDP
+    - name: web-ui
+      port: 16686
+      targetPort: 16686
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mesh-data-pvc
+  namespace: secure-mesh
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mesh-models-pvc
+  namespace: secure-mesh
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mesh-reports-pvc
+  namespace: secure-mesh
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ollama-data-pvc
+  namespace: secure-mesh
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi

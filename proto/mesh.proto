@@ -1,0 +1,284 @@
+syntax = "proto3";
+
+package mesh.v1;
+
+// ── Enums ──────────────────────────────────────────────────────────────────
+
+enum TaskState {
+    TASK_STATE_UNSPECIFIED = 0;
+    TASK_STATE_PENDING = 1;
+    TASK_STATE_DISPATCHED = 2;
+    TASK_STATE_IN_PROGRESS = 3;
+    TASK_STATE_COMPLETED = 4;
+    TASK_STATE_FAILED = 5;
+    TASK_STATE_CANCELLED = 6;
+    TASK_STATE_QUARANTINED = 7;
+}
+
+enum AgentStatus {
+    AGENT_STATUS_UNSPECIFIED = 0;
+    AGENT_STATUS_IDLE = 1;
+    AGENT_STATUS_BUSY = 2;
+    AGENT_STATUS_ERROR = 3;
+    AGENT_STATUS_QUARANTINED = 4;
+    AGENT_STATUS_OFFLINE = 5;
+}
+
+enum AnomalyLevel {
+    ANOMALY_LEVEL_UNSPECIFIED = 0;
+    ANOMALY_LEVEL_NORMAL = 1;
+    ANOMALY_LEVEL_SUSPICIOUS = 2;
+    ANOMALY_LEVEL_CRITICAL = 3;
+}
+
+enum LogSeverity {
+    LOG_SEVERITY_UNSPECIFIED = 0;
+    LOG_SEVERITY_DEBUG = 1;
+    LOG_SEVERITY_INFO = 2;
+    LOG_SEVERITY_WARNING = 3;
+    LOG_SEVERITY_ERROR = 4;
+    LOG_SEVERITY_CRITICAL = 5;
+}
+
+// ── Core Messages ─────────────────────────────────────────────────────────
+
+message PermissionScope {
+    // Whitelist of allowed action domains (e.g., "web_search", "file_read")
+    repeated string allowed_actions = 1;
+    // Maximum payload size in bytes this agent is allowed to return
+    uint64 max_payload_bytes = 2;
+    // Maximum total execution time this agent is allowed (milliseconds)
+    uint64 max_execution_ms = 3;
+    // Comma-separated list of allowed resource URIs or glob patterns
+    repeated string resource_allowlist = 4;
+}
+
+message TaskContext {
+    // UUIDv7 for the task
+    string task_id = 1;
+    // UUIDv7 for the parent task (empty if root)
+    string parent_task_id = 2;
+    // Human-readable task description (for logging only — never used for routing)
+    string description = 3;
+    // Arbitrary opaque payload the agent processes within its boundary
+    bytes payload = 4;
+    // The task definition as a JSON-serializable dict
+    string task_type = 5;
+    // ISO-8601 timestamp of task creation
+    string created_at = 6;
+    // ISO-8601 deadline; agent MUST abort if not completed by this time
+    string deadline_at = 7;
+    // Priority; lower = more urgent
+    uint32 priority = 8;
+}
+
+message SignedPacket {
+    // Protobuf payload (one of the messages in this file) serialized to bytes
+    bytes payload = 1;
+    // HMAC-SHA256(key=session_key, msg=payload) producing 32 bytes
+    bytes hmac_signature = 2;
+    // Monotonically increasing per-session counter to detect replay
+    uint64 sequence_number = 3;
+}
+
+message SessionKeys {
+    // Agent's X25519 ephemeral public key (32 bytes raw)
+    bytes agent_public_key = 1;
+    // Orchestrator's X25519 ephemeral public key (32 bytes raw)
+    bytes orchestrator_public_key = 2;
+    // Session nonce (16 bytes, used to derive AES-GCM IV base)
+    bytes nonce = 3;
+}
+
+// ── Protocol Messages ─────────────────────────────────────────────────────
+
+message AgentRegistrationRequest {
+    // Unique agent identifier (UUIDv7)
+    string agent_id = 1;
+    // Human-readable label for monitoring dashboards
+    string agent_label = 2;
+    // Reported capabilities (e.g. ["file_read", "web_search", "code_execution"])
+    repeated string capabilities = 3;
+    // Agent SDK version string
+    string sdk_version = 4;
+    // X25519 ephemeral public key for this registration (32 bytes)
+    bytes public_key = 5;
+}
+
+message AgentRegistrationResponse {
+    // Orchestrator-assigned agent_id (echoes request for verification)
+    string agent_id = 1;
+    // Orchestrator's X25519 ephemeral public key for this session
+    bytes orchestrator_public_key = 2;
+    // Session nonce for AES-GCM IV derivation
+    bytes nonce = 3;
+    // JWT access token for this agent session (RS256, 60s TTL)
+    string access_token = 4;
+    // ISO-8601 expiry timestamp of the token
+    string token_expires_at = 5;
+    // gRPC stream lease duration in seconds
+    uint32 stream_lease_seconds = 6;
+}
+
+message TaskRequest {
+    // Session JWT for auth
+    string access_token = 1;
+    // Task context (encrypted at transport layer by SignedPacket)
+    TaskContext task = 2;
+    // Permission boundaries for this specific task
+    PermissionScope permission_scope = 3;
+    // Sequence number of this request within the session
+    uint64 sequence_number = 4;
+}
+
+message TaskResult {
+    // Echoes the task_id this result is for
+    string task_id = 1;
+    // Result state
+    TaskState state = 2;
+    // Opaque result payload (encrypted at transport layer)
+    bytes payload = 3;
+    // Human-readable error message on failure
+    string error_message = 4;
+    // ISO-8601 completion timestamp
+    string completed_at = 5;
+    // Sequence number matching the original request + 1
+    uint64 sequence_number = 6;
+    // Metrics collected during execution
+    ExecutionMetrics metrics = 7;
+}
+
+message ExecutionMetrics {
+    // Wall-clock execution time in milliseconds
+    uint64 execution_time_ms = 1;
+    // Size of the result payload in bytes
+    uint64 result_payload_bytes = 2;
+    // Number of external calls made during execution
+    uint32 external_call_count = 3;
+    // Number of errors encountered during execution
+    uint32 error_count = 4;
+    // Peak memory usage in bytes
+    uint64 peak_memory_bytes = 5;
+}
+
+message HeartBeat {
+    // Agent identifier
+    string agent_id = 1;
+    // Current agent status
+    AgentStatus status = 2;
+    // ISO-8601 timestamp of this heartbeat
+    string timestamp = 3;
+    // Current task_id if busy, empty string if idle
+    string current_task_id = 4;
+    // Cumulative stats since session start
+    uint64 tasks_completed = 5;
+    uint64 tasks_failed = 6;
+    // Sequence number
+    uint64 sequence_number = 7;
+}
+
+message PermissionGrant {
+    // Token identifying the target agent
+    string agent_id = 1;
+    // New or updated permission scope
+    PermissionScope scope = 2;
+    // ISO-8601 grant timestamp
+    string granted_at = 3;
+    // ISO-8601 expiry of this grant
+    string expires_at = 4;
+    // Granting authority signature (JWT of orchestrator)
+    string grant_signature = 5;
+    // Sequence number
+    uint64 sequence_number = 6;
+}
+
+message ErrorReport {
+    // The agent that encountered the error
+    string agent_id = 1;
+    // Related task_id, empty if not task-specific
+    string task_id = 2;
+    // Error code (machine-readable)
+    string error_code = 3;
+    // Human-readable error summary
+    string error_summary = 4;
+    // Severity
+    LogSeverity severity = 5;
+    // ISO-8601 timestamp
+    string timestamp = 6;
+    // Optional stack trace or diagnostic data
+    string diagnostic_data = 7;
+    // Sequence number
+    uint64 sequence_number = 8;
+}
+
+message QuarantineNotice {
+    // Agent being quarantined
+    string agent_id = 1;
+    // Reason code for quarantine
+    string reason_code = 2;
+    // Human-readable reason
+    string reason_detail = 3;
+    // Anomaly scores contributing to this decision
+    repeated AnomalyScore scores = 4;
+    // ISO-8601 quarantine timestamp
+    string quarantined_at = 5;
+    // Whether this is manual or automatic
+    bool automatic = 6;
+}
+
+message AnomalyScore {
+    // Name of the detector (e.g. "isolation_forest", "lstm_autoencoder")
+    string detector_name = 1;
+    // Numeric score (0.0 = perfectly normal, 1.0 = maximally anomalous)
+    float score = 2;
+    // Threshold that triggered the alert
+    float threshold = 3;
+    // Anomaly level classification
+    AnomalyLevel level = 4;
+}
+
+// ── Orchestrator ↔ Agent gRPC Service ─────────────────────────────────────
+
+service AgentMesh {
+    // Agent registers with Orchestrator; completes X25519 ECDH handshake
+    rpc Register(AgentRegistrationRequest) returns (AgentRegistrationResponse);
+
+    // Bidirectional stream: Orchestrator dispatches tasks; Agent returns results
+    rpc TaskStream(stream SignedPacket) returns (stream SignedPacket);
+
+    // Unidirectional heartbeat stream from Agent to Orchestrator
+    rpc HeartBeatStream(stream HeartBeat) returns (HeartBeatAck);
+
+    // Orchestrator pushes a permission grant update to an Agent
+    rpc PushPermissionGrant(PermissionGrant) returns (GrantAck);
+
+    // Agent reports an error to the Orchestrator
+    rpc ReportError(ErrorReport) returns (ErrorAck);
+
+    // Orchestrator issues a quarantine notice (server-push, one-way)
+    rpc IssueQuarantine(QuarantineNotice) returns (QuarantineAck);
+}
+
+// ── Lightweight Ack Messages ──────────────────────────────────────────────
+
+message HeartBeatAck {
+    string agent_id = 1;
+    bool acknowledged = 2;
+    uint64 last_sequence_received = 3;
+}
+
+message GrantAck {
+    string agent_id = 1;
+    bool accepted = 2;
+    string reason = 3;
+}
+
+message ErrorAck {
+    string agent_id = 1;
+    bool logged = 2;
+}
+
+message QuarantineAck {
+    string agent_id = 1;
+    bool shutdown_initiated = 2;
+}

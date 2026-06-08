@@ -1,0 +1,117 @@
+version: "3.9"
+
+# Docker Swarm deployment stack for secure-orchestration-mesh
+# Usage: docker stack deploy -c docker-compose.swarm.yml mesh
+
+services:
+  orchestrator:
+    image: secure-orchestration-mesh-orchestrator:latest
+    ports:
+      - "50051:50051"
+      - "8443:8443"
+    environment:
+      - CONFIG_PATH=/app/config.yaml
+      - CLAUDE_API_KEY_FILE=/run/secrets/claude_api_key
+      - OPENAI_API_KEY_FILE=/run/secrets/openai_api_key
+    configs:
+      - source: mesh_config
+        target: /app/config.yaml
+    secrets:
+      - claude_api_key
+      - openai_api_key
+    volumes:
+      - mesh_data:/app/data
+      - mesh_models:/app/models
+      - mesh_reports:/app/reports
+    networks:
+      - mesh-net
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      resources:
+        limits:
+          cpus: "2"
+          memory: 4G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+
+  worker-agent:
+    image: secure-orchestration-mesh-agent:latest
+    environment:
+      - ORCHESTRATOR_ADDRESS=orchestrator:50051
+      - AGENT_LABEL=swarm-worker
+      - AGENT_CAPABILITIES=web_search,file_read,api_call
+    networks:
+      - mesh-net
+    deploy:
+      replicas: 3
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - mesh-net
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          memory: 4G
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "6831:6831/udp"
+      - "16686:16686"
+    environment:
+      - COLLECTOR_ZIPKIN_HOST_PORT=:9411
+    networks:
+      - mesh-net
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 512M
+
+networks:
+  mesh-net:
+    driver: overlay
+    attachable: true
+
+volumes:
+  mesh_data:
+    driver: local
+  mesh_models:
+    driver: local
+  mesh_reports:
+    driver: local
+  ollama_data:
+    driver: local
+
+configs:
+  mesh_config:
+    file: ./config.yaml
+
+secrets:
+  claude_api_key:
+    external: true
+  openai_api_key:
+    external: true

@@ -1,0 +1,84 @@
+version: "3.9"
+
+services:
+  # ── Orchestrator Daemon ────────────────────────────────────────────────
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mesh-orchestrator
+    ports:
+      - "50051:50051"   # gRPC
+    environment:
+      - CONFIG_PATH=/app/config.yaml
+      - CLAUDE_API_KEY=${CLAUDE_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./reports:/app/reports
+    networks:
+      - mesh-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import grpc; print('ok')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── Sample Worker Agent ────────────────────────────────────────────────
+  worker-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    container_name: mesh-worker-agent
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    environment:
+      - ORCHESTRATOR_ADDRESS=orchestrator:50051
+      - AGENT_LABEL=sample-worker-01
+      - AGENT_CAPABILITIES=web_search,file_read,api_call
+    networks:
+      - mesh-net
+    restart: unless-stopped
+
+  # ── Ollama (Local SLM) ─────────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: mesh-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - mesh-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          memory: 4G
+    # Note: Phi-3-mini must be pulled manually in Phase 0:
+    #   docker exec mesh-ollama ollama pull phi3:mini
+
+  # ── Jaeger Telemetry ──────────────────────────────────────────────────
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: mesh-jaeger
+    ports:
+      - "6831:6831/udp"   # Jaeger Thrift
+      - "16686:16686"      # Web UI
+    environment:
+      - COLLECTOR_ZIPKIN_HOST_PORT=:9411
+    networks:
+      - mesh-net
+    restart: unless-stopped
+
+networks:
+  mesh-net:
+    driver: bridge
+
+volumes:
+  ollama_data:
+    driver: local
